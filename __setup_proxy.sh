@@ -15,8 +15,8 @@ func_net_admin() {
     fi
 }
 
-func_start_psiphon() {
-    log "[INFO] Starting Psiphon tunnel core..."
+func_start_client() {
+    log "[INFO] Starting Psiphon tunnel core client..."
     pkill -f psiphon-tunnel-core-x86_64 || true
 
     PSIPHON_DATA="${PSIPHON_DATA:-/tmp/psiphon}"
@@ -25,28 +25,26 @@ func_start_psiphon() {
 
     if [ "$SHOW_LOGS" = "true" ]; then
         su -s /bin/bash psiphon -c \
-            "/app/_psiphon/psiphon-tunnel-core-x86_64 -config /app/_psiphon/psiphon.config" &
+            "/app/_psiphon/psiphon-tunnel-core-x86_64 -config /app/_psiphon/client.config" &
     else
         su -s /bin/bash psiphon -c \
-            "/app/_psiphon/psiphon-tunnel-core-x86_64 -config /app/_psiphon/psiphon.config >/dev/null 2>&1" &
+            "/app/_psiphon/psiphon-tunnel-core-x86_64 -config /app/_psiphon/client.config >/dev/null 2>&1" &
     fi
-    psiphon_pid=$!
+    client_pid=$!
 }
 
-func_check_psiphon() {
-    log "[INFO] Waiting for Psiphon to become ready..."
-    sleep 10
-    while true; do
-        sleep 5
-        checker=$(printf "%s\n" $CHECKERS | shuf -n1)
-        resp=$(curl -L --max-redirs 10 --socks5 localhost:1080 -s --max-time 30 "https://$checker" 2>/dev/null | tr -d '\n\r' || true)
-        if [ -n "$resp" ]; then
-            log "[OK] Psiphon proxy is working! Your IP: $resp (via $checker)"
+func_check_socks() {
+    log "[INFO] Waiting for SOCKS5 proxy on 127.0.0.1:1080..."
+    for i in $(seq 1 30); do
+        if timeout 1 bash -c 'echo >/dev/tcp/127.0.0.1/1080' 2>/dev/null; then
+            log "[OK] SOCKS5 proxy is ready"
+            sleep 2
             return 0
-        else
-            log "[WAIT] Psiphon proxy not ready yet, checking again in 5 seconds..."
         fi
+        sleep 2
     done
+    log "[FAIL] SOCKS5 proxy did not become ready in time"
+    return 1
 }
 
 func_expose_psiphon() {
@@ -81,14 +79,14 @@ setup_iptables() {
     iptables -t nat -A OUTPUT -p tcp --dport 53 -j RETURN
     iptables -t nat -A OUTPUT -p tcp --dport 50000 -j RETURN
     iptables -t nat -A OUTPUT -p tcp --dport 1080 -j RETURN
+    iptables -t nat -A OUTPUT -p tcp --dport 8080 -j RETURN
     iptables -t nat -A OUTPUT -p udp -d 127.0.0.1 -j RETURN
     iptables -t nat -A OUTPUT -p udp --dport 53 -j RETURN
     iptables -t nat -A OUTPUT -p udp --dport 50000 -j RETURN
-    iptables -t nat -A OUTPUT -p udp --dport 1080 -j RETURN
-    # Psiphon's own outgoing proxy connections must NOT be redirected back to redsocks
-    # or we create a circular dependency: Psiphon→target → iptables→redsocks→Psiphon→…
-    # Using --uid-owner (dedicated 'psiphon' user) instead of --pid-owner because
-    # --pid-owner requires the xt_owner PID match which is often unavailable in Docker.
+    # The tunnel-core client's own outbound connections to Psiphon servers
+    # must NOT be redirected back to redsocks or we create a circular
+    # dependency: client→server → iptables→redsocks→client→…
+    # Using --uid-owner (dedicated 'psiphon' user) to bypass.
     iptables -t nat -A OUTPUT -p tcp -m owner --uid-owner psiphon -j RETURN 2>/dev/null || \
     log "[WARN] Could not add --uid-owner bypass for user 'psiphon' (iptables owner module may be missing)"
     iptables -t nat -A OUTPUT -p tcp -j REDIRECT --to-ports 50000
@@ -96,9 +94,9 @@ setup_iptables() {
 }
 
 func_set_proxy() {
-    log "[START] Setting up full proxy stack (Psiphon + Redsocks + iptables)..."
-    func_start_psiphon
-    func_check_psiphon
+    log "[START] Setting up full proxy stack (tunnel-core + Redsocks + iptables)..."
+    func_start_client
+    func_check_socks
     func_expose_psiphon
     setup_redsocks
     setup_iptables
@@ -123,9 +121,7 @@ func_set_proxy() {
 
 func_global_monitor() {
     while true; do
-        log "[RESTART] Shutting down old Psiphon and Redsocks processes..."
-        # Flush iptables first so the new Psiphon instance's DoH traffic isn't
-        # circularly redirected before fresh rules with its UID are applied
+        log "[RESTART] Shutting down old processes..."
         iptables -t nat -F 2>/dev/null || true
         pkill -f psiphon-tunnel-core-x86_64 || true
         pkill -f redsocks || true
