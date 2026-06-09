@@ -42,4 +42,4 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: true
           tags: |
-            ghcr.io/techroy23/docker-psiphon-redsocks:latest
+            ghcr.io/techroy23/docker-psiphon-redsocks:ubuntu
